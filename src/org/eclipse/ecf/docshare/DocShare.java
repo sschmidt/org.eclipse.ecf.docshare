@@ -14,8 +14,6 @@
 
 package org.eclipse.ecf.docshare;
 
-import org.eclipse.ecf.internal.docshare.Messages;
-
 import java.io.*;
 import java.util.Collections;
 import java.util.Map;
@@ -23,7 +21,7 @@ import org.eclipse.core.filesystem.EFS;
 import org.eclipse.core.filesystem.IFileStore;
 import org.eclipse.core.runtime.*;
 import org.eclipse.core.runtime.Assert;
-import org.eclipse.ecf.core.IContainer;
+import org.eclipse.ecf.core.*;
 import org.eclipse.ecf.core.identity.ID;
 import org.eclipse.ecf.core.identity.IDCreateException;
 import org.eclipse.ecf.core.util.ECFException;
@@ -38,6 +36,8 @@ import org.eclipse.ecf.presence.roster.*;
 import org.eclipse.ecf.sync.*;
 import org.eclipse.ecf.sync.doc.DocumentChangeMessage;
 import org.eclipse.ecf.sync.doc.IDocumentSynchronizationStrategyFactory;
+import org.eclipse.ecf.wave.IWaveClientContainer;
+import org.eclipse.ecf.wave.IWaveletDocument;
 import org.eclipse.jface.dialogs.MessageDialog;
 import org.eclipse.jface.text.*;
 import org.eclipse.jface.text.source.*;
@@ -375,8 +375,16 @@ public class DocShare extends AbstractShare {
 
 					// Get content from local document
 					final String content = editorPart.getDocumentProvider().getDocument(editorPart.getEditorInput()).get();
+
 					// Send start message with current content
-					sendMessage(toID, new StartMessage(our, fName, toID, content, fileName).serialize());
+					IWaveClientContainer container = connectWaveClient();
+
+					ID waveID = container.getWaveNamespace().createInstance(new String[] {"wave-test.de", fileName}); //$NON-NLS-1$
+					container.createWave(waveID);
+
+					container.getWave(waveID).getRootWavelet().getRootDocument().appendCharacters(content);
+
+					sendMessage(toID, new StartMessage(our, fName, toID, null, fileName).serialize());
 					// Set local sharing start (to setup doc listener)
 					localStartShare(getLocalRosterManager(), our, our, toID, editorPart);
 				} catch (final Exception e) {
@@ -451,8 +459,6 @@ public class DocShare extends AbstractShare {
 		Assert.isNotNull(our);
 		final String filename = message.getFilename();
 		Assert.isNotNull(filename);
-		final String documentContent = message.getDocumentContent();
-		Assert.isNotNull(documentContent);
 
 		//SYNC API. Create an instance of the synchronization strategy on the receiver
 		syncStrategy = createSynchronizationStrategy(false);
@@ -466,9 +472,6 @@ public class DocShare extends AbstractShare {
 				// And we're done
 				return;
 			}
-			// Otherwise set start content to the message-provided
-			// documentContent
-			startContent = documentContent;
 		}
 		// Then open UI and show text editor if appropriate
 		Display.getDefault().asyncExec(new Runnable() {
@@ -477,7 +480,11 @@ public class DocShare extends AbstractShare {
 					// First, ask user if they want to receive the doc
 					if (openReceiverDialog(senderID, senderUsername, filename)) {
 						// If so, then we create a new DocShareEditorInput
-						final DocShareEditorInput dsei = new DocShareEditorInput(getTempFileStore(senderUsername, filename, startContent), senderUsername, filename);
+						IWaveClientContainer container = connectWaveClient();
+						ID waveID = container.getWaveNamespace().createInstance(new String[] {"wave-test.de", filename}); //$NON-NLS-1$
+						IWaveletDocument rootDocument = container.getWave(waveID).getRootWavelet().getRootDocument();
+
+						final DocShareEditorInput dsei = new DocShareEditorInput(getTempFileStore(senderUsername, filename, rootDocument.toString()), senderUsername, filename);
 						// Then open up text editor
 						final ITextEditor ep;
 						IEditorPart editorPart = PlatformUI.getWorkbench().getActiveWorkbenchWindow().getActivePage().openEditor(dsei, getEditorIdForFileName(filename));
@@ -834,5 +841,18 @@ public class DocShare extends AbstractShare {
 				return false;
 			return ourID.equals(initiatorID);
 		}
+	}
+
+	// TODO: temp
+	IWaveClientContainer connectWaveClient() throws ContainerCreateException, ContainerConnectException {
+		IWaveClientContainer container = (IWaveClientContainer) ContainerFactory.getDefault().createContainer("ecf.googlewave.client"); //$NON-NLS-1$
+		ID targetID = container.getConnectNamespace().createInstance(new String[] {"docshare@wave-test.de", "wave-test.de"}); //$NON-NLS-1$ //$NON-NLS-2$
+		container.connect(targetID, null);
+		try {
+			Thread.sleep(1000);
+		} catch (InterruptedException e) {
+			e.printStackTrace();
+		}
+		return container;
 	}
 }
