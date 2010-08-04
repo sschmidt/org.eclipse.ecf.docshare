@@ -26,3 +26,4 @@ Export-Package: org.eclipse.ecf.docshare,
  org.eclipse.ecf.internal.docshare;x-internal:=true
 Eclipse-BuddyPolicy: global
 Bundle-ActivationPolicy: lazy
+Import-Package: org.eclipse.ecf.provider.xmpp.identity

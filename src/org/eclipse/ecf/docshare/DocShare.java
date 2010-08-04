@@ -33,11 +33,11 @@ import org.eclipse.ecf.docshare.messages.*;
 import org.eclipse.ecf.internal.docshare.*;
 import org.eclipse.ecf.presence.IPresenceContainerAdapter;
 import org.eclipse.ecf.presence.roster.*;
+import org.eclipse.ecf.provider.xmpp.identity.XMPPID;
 import org.eclipse.ecf.sync.*;
 import org.eclipse.ecf.sync.doc.DocumentChangeMessage;
 import org.eclipse.ecf.sync.doc.IDocumentSynchronizationStrategyFactory;
-import org.eclipse.ecf.wave.IWaveClientContainer;
-import org.eclipse.ecf.wave.IWaveletDocument;
+import org.eclipse.ecf.wave.*;
 import org.eclipse.jface.dialogs.MessageDialog;
 import org.eclipse.jface.text.*;
 import org.eclipse.jface.text.source.*;
@@ -49,12 +49,19 @@ import org.eclipse.ui.*;
 import org.eclipse.ui.editors.text.EditorsUI;
 import org.eclipse.ui.texteditor.IDocumentProvider;
 import org.eclipse.ui.texteditor.ITextEditor;
+import org.waveprotocol.wave.federation.Proto.ProtocolHashedVersion;
+import org.waveprotocol.wave.model.document.operation.BufferedDocOp;
+import org.waveprotocol.wave.model.document.operation.DocOpComponentType;
+import org.waveprotocol.wave.model.operation.core.CoreWaveletDocumentOperation;
+import org.waveprotocol.wave.model.operation.core.CoreWaveletOperation;
 
 /**
  * Represents a document sharing session between two participants.
  * @since 2.1
  */
 public class DocShare extends AbstractShare {
+
+	private static final String WAVE_DOMAIN = "wave-test.de"; //$NON-NLS-1$
 
 	public static class SelectionReceiver {
 
@@ -302,6 +309,10 @@ public class DocShare extends AbstractShare {
 			// Model change messages returned from the registerLocalChange call are then sent (via ECF datashare channel)
 			// to remote participant.
 			IModelChangeMessage changeMessages[] = syncStrategy.registerLocalChange(new DocumentChangeMessage(event.getOffset(), event.getLength(), event.getText()));
+
+			IWaveletDocument rootDocument = waveClientContainer.getWave(waveID).getRootWavelet().getRootDocument();
+			rootDocument.modifyDocument(event.getOffset(), event.getLength(), event.getText());
+
 			for (int i = 0; i < changeMessages.length; i++) {
 				try {
 					sendMessage(getOtherID(), changeMessages[i].serialize());
@@ -309,6 +320,7 @@ public class DocShare extends AbstractShare {
 					logError(Messages.DocShare_EXCEPTION_SEND_MESSAGE, e);
 				}
 			}
+
 		}
 	};
 
@@ -342,6 +354,10 @@ public class DocShare extends AbstractShare {
 		}
 
 	};
+
+	IWaveClientContainer waveClientContainer = null;
+
+	ID waveID = null;
 
 	/**
 	 * Start sharing an editor's contents between two participants. This will
@@ -377,12 +393,25 @@ public class DocShare extends AbstractShare {
 					final String content = editorPart.getDocumentProvider().getDocument(editorPart.getEditorInput()).get();
 
 					// Send start message with current content
-					IWaveClientContainer container = connectWaveClient();
+					if (waveClientContainer == null) {
+						connectWaveClient(our);
+					}
 
-					ID waveID = container.getWaveNamespace().createInstance(new String[] {"wave-test.de", fileName}); //$NON-NLS-1$
-					container.createWave(waveID);
+					waveID = waveClientContainer.getWaveNamespace().createInstance(new String[] {WAVE_DOMAIN, fileName});
+					waveClientContainer.createWave(waveID);
 
-					container.getWave(waveID).getRootWavelet().getRootDocument().appendCharacters(content);
+					while (waveClientContainer.getWave(waveID) == null) {
+						Thread.sleep(500); // wait for connection; TODO: blocking calls
+					}
+
+					XMPPID toXmppID = (XMPPID) toID;
+
+					ID toParticipantID = waveClientContainer.getParticipantNamespace().createInstance(new String[] {toXmppID.getUsername() + "." + toXmppID.getHostname() + "@" + WAVE_DOMAIN});
+					waveClientContainer.getWave(waveID).getRootWavelet().addParticipant(toParticipantID);
+
+					if (content.length() > 0) {
+						waveClientContainer.getWave(waveID).getRootWavelet().getRootDocument().appendCharacters(content);
+					}
 
 					sendMessage(toID, new StartMessage(our, fName, toID, null, fileName).serialize());
 					// Set local sharing start (to setup doc listener)
@@ -480,9 +509,16 @@ public class DocShare extends AbstractShare {
 					// First, ask user if they want to receive the doc
 					if (openReceiverDialog(senderID, senderUsername, filename)) {
 						// If so, then we create a new DocShareEditorInput
-						IWaveClientContainer container = connectWaveClient();
-						ID waveID = container.getWaveNamespace().createInstance(new String[] {"wave-test.de", filename}); //$NON-NLS-1$
-						IWaveletDocument rootDocument = container.getWave(waveID).getRootWavelet().getRootDocument();
+						if (waveClientContainer == null) {
+							connectWaveClient(our);
+						}
+						waveID = waveClientContainer.getWaveNamespace().createInstance(new String[] {WAVE_DOMAIN, filename});
+
+						while (waveClientContainer.getWave(waveID) == null) {
+							Thread.sleep(500); // wait for connection; TODO: blocking calls
+						}
+
+						IWaveletDocument rootDocument = waveClientContainer.getWave(waveID).getRootWavelet().getRootDocument();
 
 						final DocShareEditorInput dsei = new DocShareEditorInput(getTempFileStore(senderUsername, filename, rootDocument.toString()), senderUsername, filename);
 						// Then open up text editor
@@ -562,12 +598,12 @@ public class DocShare extends AbstractShare {
 						IModelChange modelChanges[] = syncStrategy.transformRemoteChange(documentChangeMessage);
 
 						// Make editor refuse input while we are applying changes
-						setEditorToRefuseInput();
+						//setEditorToRefuseInput();
 
 						for (int i = 0; i < modelChanges.length; i++) {
 							// Apply each change to a model.  Clients may use this method
 							// to apply the change to a model of appropriate type
-							modelChanges[i].applyToModel(document);
+							//modelChanges[i].applyToModel(document);
 						}
 					}
 				} catch (final Exception e) {
@@ -575,7 +611,7 @@ public class DocShare extends AbstractShare {
 					showErrorToUser(Messages.DocShare_EXCEPTION_RECEIVING_MESSAGE_TITLE, NLS.bind(Messages.DocShare_EXCEPTION_RECEIVING_MESSAGE_MESSAGE, e.getLocalizedMessage()));
 				} finally {
 					// Have editor accept input
-					setEditorToAcceptInput();
+					// setEditorToAcceptInput();
 					Trace.exiting(Activator.PLUGIN_ID, DocshareDebugOptions.METHODS_EXITING, this.getClass(), "handleUpdateMessage"); //$NON-NLS-1$
 				}
 			}
@@ -735,6 +771,53 @@ public class DocShare extends AbstractShare {
 			final IDocument doc = getDocumentFromEditor();
 			if (doc != null)
 				doc.addDocumentListener(documentListener);
+
+			waveClientContainer.addWaveletOperationListener(new IWaveletListener() {
+
+				public void notify(IWavelet wavelet, String author, CoreWaveletOperation coreOperation) {
+					XMPPID ourXmppID = (XMPPID) getOurID();
+					String ourName = ourXmppID.getUsername() + "." + ourXmppID.getHostname() + "@" + WAVE_DOMAIN;
+
+					if (!author.equals(ourName) && coreOperation instanceof CoreWaveletDocumentOperation) {
+						CoreWaveletDocumentOperation coreDocOperation = (CoreWaveletDocumentOperation) coreOperation;
+						if (coreDocOperation.getDocumentId().equals("conversation")) { //$NON-NLS-1$
+							BufferedDocOp operation = coreDocOperation.getOperation();
+							coreDocOperation.getOperation().size();
+
+							if (coreDocOperation.getOperation().size() == 3) {
+								if (operation.getType(0).equals(DocOpComponentType.RETAIN)) {
+									if (operation.getType(1).equals(DocOpComponentType.CHARACTERS)) {
+										try {
+											setEditorToRefuseInput();
+											new DocumentChangeMessage(operation.getRetainItemCount(0), 0, operation.getCharactersString(1)).applyToModel(doc);
+										} catch (ModelUpdateException e) {
+											e.printStackTrace();
+										} finally {
+											setEditorToAcceptInput();
+										}
+									}
+
+									if (operation.getType(1).equals(DocOpComponentType.DELETE_CHARACTERS)) {
+										try {
+											setEditorToRefuseInput();
+											new DocumentChangeMessage(operation.getRetainItemCount(0), operation.getDeleteCharactersString(1).length(), "").applyToModel(doc);
+										} catch (ModelUpdateException e) {
+											e.printStackTrace();
+										} finally {
+											setEditorToAcceptInput();
+										}
+									}
+								}
+							}
+
+						}
+					}
+				}
+
+				public void commit(IWavelet wavelet, ProtocolHashedVersion commitNotice) {
+					// not needed
+				}
+			});
 			if (this.editor != null) {
 				ISelectionProvider selectionProvider = this.editor.getSelectionProvider();
 				if (selectionProvider instanceof IPostSelectionProvider) {
@@ -844,15 +927,11 @@ public class DocShare extends AbstractShare {
 	}
 
 	// TODO: temp
-	IWaveClientContainer connectWaveClient() throws ContainerCreateException, ContainerConnectException {
-		IWaveClientContainer container = (IWaveClientContainer) ContainerFactory.getDefault().createContainer("ecf.googlewave.client"); //$NON-NLS-1$
-		ID targetID = container.getConnectNamespace().createInstance(new String[] {"docshare@wave-test.de", "wave-test.de"}); //$NON-NLS-1$ //$NON-NLS-2$
-		container.connect(targetID, null);
-		try {
-			Thread.sleep(1000);
-		} catch (InterruptedException e) {
-			e.printStackTrace();
-		}
-		return container;
+	void connectWaveClient(ID our) throws ContainerCreateException, ContainerConnectException {
+		waveClientContainer = (IWaveClientContainer) ContainerFactory.getDefault().createContainer("ecf.googlewave.client"); //$NON-NLS-1$
+		XMPPID xmppID = (XMPPID) our;
+		System.out.println(xmppID.getUsername() + "." + xmppID.getHostname() + "@" + WAVE_DOMAIN);
+		ID targetID = waveClientContainer.getConnectNamespace().createInstance(new String[] {xmppID.getUsername() + "." + xmppID.getHostname() + "@" + WAVE_DOMAIN, WAVE_DOMAIN}); //$NON-NLS-1$
+		waveClientContainer.connect(targetID, null);
 	}
 }
